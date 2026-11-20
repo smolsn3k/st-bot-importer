@@ -7,7 +7,7 @@ import * as TAGS from '../../../tags.js';
 import { readPng, writePng, extractCard, normalizeCard, writeCardChunks, makeSig, evaluate } from './lib.js';
 
 const MODULE = 'bot_importer';
-const DEFAULTS = { dupThreshold: 85, similarThreshold: 60, autoSkipExact: true };
+const DEFAULTS = { dupThreshold: 85, similarThreshold: 60, autoSkipExact: true, ignoreCardTags: false, ignoredTags: '' };
 const RANK = { exact: 4, alt: 3, intro: 3, similar: 2, name: 1 };
 
 const items = [];
@@ -31,6 +31,13 @@ const tick = () => new Promise(r => setTimeout(r, 0));
 const pct = x => `${Math.round(x * 100)}%`;
 const safeName = s => String(s).replace(/[\\/:*?"<>|]+/g, '_').trim().slice(0, 80) || 'card';
 const sameTags = (a, b) => a.length === b.length && a.every(t => b.some(u => u.toLowerCase() === t.toLowerCase()));
+const ignoredList = () => String(cfg().ignoredTags || '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+/** Tags a card starts with after the "ignore tags" settings are applied. */
+const baseTags = list => {
+    if (cfg().ignoreCardTags) return [];
+    const ig = ignoredList();
+    return list.filter(t => !ig.includes(t.toLowerCase()));
+};
 
 function h(tag, props, ...kids) {
     const el = document.createElement(tag);
@@ -127,7 +134,7 @@ async function parseFile(file) {
     if (!card.name) card.name = base;
     return {
         id: ++uid, file, kind: ext, chunks, hadV3: hadV3 || raw.spec === 'chara_card_v3', raw,
-        name: card.name, tags: [...card.tags], originalTags: [...card.tags], world: '',
+        name: card.name, tags: baseTags(card.tags), originalTags: [...card.tags], world: '', extras: [],
         newAvatar: null, newAvatarUrl: null, previewUrl: ext === 'png' ? URL.createObjectURL(file) : null,
         selected: true, userToggled: false, status: 'ready', error: '', sig: makeSig(card),
         libDups: [], batchDups: [], dups: [], level: null, skip: false, el: null,
@@ -229,6 +236,7 @@ function renderTags(it) {
         x.addEventListener('click', () => { it.tags = it.tags.filter(v => v !== t); renderTags(it); });
         box.insertBefore(h('span', { class: 'bim-chip' }, t, x), input);
     }
+    schedulePool();
 }
 
 function addTags(it, text) {
@@ -236,6 +244,89 @@ function addTags(it, text) {
         if (!it.tags.some(x => x.toLowerCase() === t.toLowerCase())) it.tags.push(t);
     }
     renderTags(it);
+}
+
+let poolTimer = null;
+function schedulePool() {
+    clearTimeout(poolTimer);
+    poolTimer = setTimeout(refreshPool, 30);
+}
+
+/** Shows every tag found on the selected cards; tapping one removes it from all of them. */
+function refreshPool() {
+    if (!els.pool) return;
+    const counts = new Map();
+    for (const it of items) {
+        if (!it.selected) continue;
+        for (const t of it.tags) {
+            const k = t.toLowerCase();
+            const c = counts.get(k) || { name: t, n: 0 };
+            c.n++;
+            counts.set(k, c);
+        }
+    }
+    els.pool.replaceChildren(...[...counts.values()]
+        .sort((a, b) => b.n - a.n || a.name.localeCompare(b.name))
+        .map(({ name, n }) => {
+            const b = h('button', { type: 'button', class: 'bim-pool-chip', title: `Remove "${name}" from ${n} selected card${n > 1 ? 's' : ''}` },
+                name, h('span', { class: 'bim-pool-n' }, String(n)), h('i', { class: 'fa-solid fa-xmark' }));
+            b.addEventListener('click', () => removeTags(items.filter(i => i.selected), [name]));
+            return b;
+        }));
+    els.poolWrap.hidden = !counts.size;
+}
+
+/** Removes the given tags from every card in targets. Returns how many cards changed. */
+function removeTags(targets, names) {
+    const drop = new Set(names.map(n => n.toLowerCase()));
+    let changed = 0;
+    for (const it of targets) {
+        const before = it.tags.length;
+        it.tags = it.tags.filter(t => !drop.has(t.toLowerCase()));
+        if (it.tags.length !== before) { changed++; renderTags(it); }
+    }
+    return changed;
+}
+
+function applyIgnore(it) {
+    const orig = it.originalTags.map(t => t.toLowerCase());
+    const added = it.tags.filter(t => !orig.includes(t.toLowerCase()));
+    const merged = [...baseTags(it.originalTags), ...added];
+    it.tags = merged.filter((t, i) => merged.findIndex(u => u.toLowerCase() === t.toLowerCase()) === i);
+    renderTags(it);
+}
+
+function setIgnoreAll(v) {
+    cfg().ignoreCardTags = !!v;
+    save();
+    if (els.ignoreChk) els.ignoreChk.checked = !!v;
+    const s = document.getElementById('bim_ignore');
+    if (s) s.checked = !!v;
+    items.forEach(applyIgnore);
+}
+
+function renderExtras(it) {
+    const box = it.el.querySelector('.bim-extras');
+    box.replaceChildren(...it.extras.map(w => {
+        const x = h('button', { type: 'button', title: 'Remove lorebook', 'aria-label': `Remove lorebook ${w}` }, '×');
+        x.addEventListener('click', () => { it.extras = it.extras.filter(v => v !== w); renderExtras(it); fillExtraSel(it); });
+        return h('span', { class: 'bim-chip' }, w, x);
+    }));
+    box.hidden = !it.extras.length;
+}
+
+function fillExtraSel(it) {
+    const sel = it.el.querySelector('.bim-extra-sel');
+    sel.replaceChildren(
+        h('option', { value: '' }, 'Add a lorebook'),
+        ...worlds.filter(w => !it.extras.includes(w)).map(w => h('option', { value: w }, w)));
+    sel.value = '';
+}
+
+function addExtra(it, name) {
+    if (!it.extras.includes(name)) it.extras.push(name);
+    renderExtras(it);
+    fillExtraSel(it);
 }
 
 function fillWorld(it) {
@@ -247,6 +338,7 @@ function fillWorld(it) {
         ...worlds.map(w => h('option', { value: w }, w)),
     );
     sel.value = it.world;
+    fillExtraSel(it);
 }
 
 function cmpCol(title, text) {
@@ -320,6 +412,9 @@ function createCard(it) {
     const worldSel = h('select', { class: 'bim-world', 'aria-label': 'Lorebook' });
     worldSel.addEventListener('change', () => { it.world = worldSel.value; });
 
+    const extraSel = h('select', { class: 'bim-extra-sel', 'aria-label': 'Add an additional lorebook' });
+    extraSel.addEventListener('change', () => { if (extraSel.value) addExtra(it, extraSel.value); extraSel.value = ''; });
+
     const alts = d.alternate_greetings.length;
     const snippet = (d.description || d.first_mes || '').replace(/\s+/g, ' ').trim().slice(0, 200);
 
@@ -336,10 +431,11 @@ function createCard(it) {
             h('button', { type: 'button', class: 'bim-x', title: 'Remove from this list', 'aria-label': `Remove ${it.name} from the list`, onclick: () => removeItem(it) }, h('i', { class: 'fa-solid fa-xmark' }))),
         h('div', { class: 'bim-dups' }),
         h('div', { class: 'bim-field' }, h('span', { class: 'bim-lbl' }, h('i', { class: 'fa-solid fa-tags' }), 'Tags'), h('div', { class: 'bim-chips' }, tagInput)),
-        h('div', { class: 'bim-field' }, h('span', { class: 'bim-lbl' }, h('i', { class: 'fa-solid fa-book' }), 'Lorebook'), worldSel),
+        h('div', { class: 'bim-field' }, h('span', { class: 'bim-lbl' }, h('i', { class: 'fa-solid fa-book' }), 'Main lorebook'), worldSel),
+        h('div', { class: 'bim-field' }, h('span', { class: 'bim-lbl' }, h('i', { class: 'fa-solid fa-book-bookmark' }), 'Additional lorebooks'), h('div', { class: 'bim-extras', hidden: true }), extraSel),
         h('div', { class: 'bim-state', hidden: true }));
 
-    renderAvatar(it); renderTags(it); fillWorld(it); renderDups(it); renderState(it); syncSel(it);
+    renderAvatar(it); renderTags(it); renderExtras(it); fillWorld(it); renderDups(it); renderState(it); syncSel(it);
     return it.el;
 }
 
@@ -365,6 +461,11 @@ async function refreshWorlds() {
         worlds = [];
     }
     for (const it of items) fillWorld(it);
+    if (els.bulkExtra) {
+        els.bulkExtra.replaceChildren(
+            h('option', { value: '' }, 'Add an additional lorebook'),
+            ...worlds.map(w => h('option', { value: w }, w)));
+    }
     if (els.bulkWorld) {
         els.bulkWorld.replaceChildren(
             h('option', { value: '' }, 'Choose a lorebook'),
@@ -454,6 +555,18 @@ function applyTags(avatar, names) {
     tag_map[avatar] = [...ids];
 }
 
+/** Additional lorebooks live in SillyTavern's lorebook settings, keyed by the card's file name without extension. */
+async function applyExtraBooks(avatar, books) {
+    const wi = await import('../../../world-info.js');
+    const info = wi.world_info;
+    if (!info) throw new Error('lorebook settings are not reachable');
+    const key = avatar.replace(/\.[^.]+$/, '');
+    info.charLore ??= [];
+    let entry = info.charLore.find(e => e.name === key);
+    if (!entry) { entry = { name: key, extraBooks: [] }; info.charLore.push(entry); }
+    entry.extraBooks = [...new Set([...(entry.extraBooks || []), ...books])];
+}
+
 async function importItem(it) {
     const card = it.raw.data;
     card.tags = [...it.tags];
@@ -480,6 +593,14 @@ async function importItem(it) {
     }
     const avatar = `${await uploadCharacter(file, type)}.png`;
     applyTags(avatar, it.tags);
+    if (it.extras.length) {
+        try {
+            await applyExtraBooks(avatar, it.extras);
+        } catch (e) {
+            console.warn('[BotImporter] additional lorebooks failed', e);
+            toast('warning', `${it.name} was imported, but its additional lorebooks could not be set.`);
+        }
+    }
     return avatar;
 }
 
@@ -544,6 +665,7 @@ function updateFooter() {
     els.importBtn.disabled = busy || !sel;
     els.importLabel.textContent = sel ? `Import ${sel} bot${sel > 1 ? 's' : ''}` : 'Import';
     els.empty.hidden = items.length > 0;
+    schedulePool();
 }
 
 function bulkTargets() {
@@ -591,15 +713,46 @@ function buildModal() {
 
     const btn = (icon, label, fn, cls = '') => h('button', { type: 'button', class: `bim-btn ${cls}`, onclick: fn }, h('i', { class: `fa-solid ${icon}` }), label);
 
+    els.bulkExtra = h('select', { class: 'bim-input', 'aria-label': 'Additional lorebook for selected cards' });
+    els.bulkExtra.addEventListener('change', () => {
+        const v = els.bulkExtra.value;
+        if (!v) return;
+        const t = bulkTargets();
+        t.forEach(i => addExtra(i, v));
+        if (t.length) toast('success', `Lorebook added to ${t.length} card${t.length > 1 ? 's' : ''}.`);
+        els.bulkExtra.value = '';
+    });
+
+    els.bulkRemove = h('input', { type: 'text', class: 'bim-input', placeholder: 'Tags to remove, separated by commas', enterkeyhint: 'done', autocomplete: 'off', autocapitalize: 'none' });
+    const applyBulkRemove = () => {
+        const names = els.bulkRemove.value.split(',').map(s => s.trim()).filter(Boolean);
+        if (!names.length) return;
+        const t = bulkTargets();
+        if (!t.length) return;
+        const n = removeTags(t, names);
+        els.bulkRemove.value = '';
+        toast(n ? 'success' : 'info', n ? `Removed from ${n} card${n > 1 ? 's' : ''}.` : 'None of the selected cards had those tags.');
+    };
+    els.bulkRemove.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); applyBulkRemove(); } });
+
+    els.ignoreChk = h('input', { type: 'checkbox', checked: cfg().ignoreCardTags });
+    els.ignoreChk.addEventListener('change', () => setIgnoreAll(els.ignoreChk.checked));
+
+    els.pool = h('div', { class: 'bim-pool' });
+    els.poolWrap = h('div', { class: 'bim-pool-wrap', hidden: true },
+        h('div', { class: 'bim-lbl' }, 'Tags on the selected cards. Tap one to remove it from all of them'), els.pool);
+
     const bulk = h('div', { class: 'bim-bulk' },
         h('div', { class: 'bim-row' },
             btn('fa-check-double', 'Select all', () => { items.forEach(i => { i.selected = true; i.userToggled = true; syncSel(i); }); updateFooter(); }),
             btn('fa-square', 'Select none', () => { items.forEach(i => { i.selected = false; i.userToggled = true; syncSel(i); }); updateFooter(); }),
             btn('fa-filter', 'Only unique', () => { items.forEach(i => { i.selected = !i.level || i.level === 'name'; i.userToggled = true; syncSel(i); }); updateFooter(); }),
             btn('fa-trash-can', 'Clear list', () => { if (busy) return; [...items].forEach(i => removeItem(i, true)); updateFooter(); setStatus(''); })),
-        h('div', { class: 'bim-row' },
-            els.bulkTag, btn('fa-tag', 'Add tag', applyBulkTag),
-            els.bulkWorld));
+        h('div', { class: 'bim-row' }, els.bulkTag, btn('fa-tag', 'Add tags', applyBulkTag)),
+        h('div', { class: 'bim-row' }, els.bulkRemove, btn('fa-eraser', 'Remove tags', applyBulkRemove)),
+        els.poolWrap,
+        h('div', { class: 'bim-row' }, els.bulkWorld, els.bulkExtra),
+        h('label', { class: 'bim-check' }, els.ignoreChk, h('span', {}, 'Ignore tags that come with the cards')));
 
     els.importLabel = h('span', {}, 'Import');
     els.importBtn = h('button', { type: 'button', class: 'bim-btn primary', onclick: doImport }, h('i', { class: 'fa-solid fa-file-import' }), els.importLabel);
@@ -631,6 +784,7 @@ async function openModal() {
     overlay.classList.add('open');
     document.body.classList.add('bim-lock');
     updateFooter();
+    if (els.ignoreChk) els.ignoreChk.checked = cfg().ignoreCardTags;
     refreshTagList();
     await refreshWorlds();
 }
@@ -663,6 +817,10 @@ function mountSettings() {
                     <input id="bim_sim" type="range" min="30" max="95" step="1" value="${c.similarThreshold}">
                 </label>
                 <label class="checkbox_label"><input id="bim_auto" type="checkbox" ${c.autoSkipExact ? 'checked' : ''}><span>Untick exact duplicates automatically</span></label>
+                <label class="checkbox_label"><input id="bim_ignore" type="checkbox" ${c.ignoreCardTags ? 'checked' : ''}><span>Ignore tags that come with the cards</span></label>
+                <label class="bim-set">Always ignore these tags (separated by commas)
+                    <input id="bim_ignored" type="text" class="text_pole" autocomplete="off">
+                </label>
                 <small>Cards are compared by description and intro messages, never by name alone. New thresholds apply to cards added from now on.</small>
             </div>
         </div>`;
@@ -676,6 +834,10 @@ function mountSettings() {
     bindRange('#bim_dup', '#bim_dup_val', 'dupThreshold');
     bindRange('#bim_sim', '#bim_sim_val', 'similarThreshold');
     wrap.querySelector('#bim_auto').addEventListener('change', e => { cfg().autoSkipExact = e.target.checked; save(); });
+    wrap.querySelector('#bim_ignore').addEventListener('change', e => setIgnoreAll(e.target.checked));
+    const ignored = wrap.querySelector('#bim_ignored');
+    ignored.value = c.ignoredTags || '';
+    ignored.addEventListener('change', () => { cfg().ignoredTags = ignored.value; save(); items.forEach(applyIgnore); });
 }
 
 function mountButtons() {
