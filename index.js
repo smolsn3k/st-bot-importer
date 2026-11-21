@@ -8,7 +8,7 @@ import { readPng, writePng, extractCard, normalizeCard, writeCardChunks, makeSig
 import { RU, PL, pluralIndex } from './i18n.js';
 
 const MODULE = 'bot_importer';
-const DEFAULTS = { dupThreshold: 85, similarThreshold: 60, autoSkipExact: true, ignoreCardTags: false, ignoredTags: '', language: 'auto' };
+const DEFAULTS = { dupThreshold: 85, similarThreshold: 60, autoSkipExact: true, ignoreCardTags: false, ignoredTags: '', language: 'auto', askCrop: true };
 const RANK = { exact: 4, alt: 3, intro: 3, similar: 2, name: 1 };
 
 const items = [];
@@ -162,7 +162,7 @@ async function parseFile(file) {
     return {
         id: ++uid, file, kind: ext, chunks, hadV3: hadV3 || raw.spec === 'chara_card_v3', raw,
         name: card.name, tags: baseTags(card.tags), originalTags: [...card.tags], world: '', extras: [],
-        newAvatar: null, newAvatarUrl: null, previewUrl: ext === 'png' ? URL.createObjectURL(file) : null,
+        newAvatar: null, newAvatarUrl: null, avatarSource: null, avatarCropped: false, previewUrl: ext === 'png' ? URL.createObjectURL(file) : null,
         selected: true, userToggled: false, status: 'ready', error: '', sig: makeSig(card),
         libDups: [], batchDups: [], dups: [], level: null, skip: false, el: null,
     };
@@ -245,13 +245,168 @@ function renderAvatar(it) {
         letter.textContent = (it.name.trim()[0] || '?').toUpperCase();
     }
     it.el.querySelector('.bim-reset').hidden = !it.newAvatar;
+    it.el.querySelector('.bim-crop-btn').hidden = !(it.newAvatar || it.previewUrl);
 }
 
-function setAvatar(it, file) {
+function setAvatar(it, file, opts = {}) {
     if (it.newAvatarUrl) URL.revokeObjectURL(it.newAvatarUrl);
     it.newAvatar = file || null;
     it.newAvatarUrl = file ? URL.createObjectURL(file) : null;
+    it.avatarSource = file ? (opts.source || file) : null;
+    it.avatarCropped = !!(file && opts.cropped);
     renderAvatar(it);
+}
+
+/** A picture was picked or dropped: let the user crop it first (unless the cropper is switched off). */
+async function chooseAvatar(it, file) {
+    if (!cfg().askCrop) { setAvatar(it, file); return; }
+    const out = await openCropper(file);
+    if (out) setAvatar(it, out, { source: file, cropped: true });
+}
+
+/** Crop again, starting from the picture the user originally chose (or the card's own image). */
+async function recrop(it) {
+    const src = it.avatarSource || (it.kind === 'png' ? it.file : null);
+    if (!src) return;
+    const out = await openCropper(src);
+    if (out) setAvatar(it, out, { source: src, cropped: true });
+}
+
+/* ---------- cropper ---------- */
+
+let cropOpen = false;
+
+/** Opens a 2:3 cropper (drag to move, pinch / wheel / slider to zoom). Resolves with a 512x768 PNG File, or null if cancelled. */
+function openCropper(file) {
+    return new Promise(resolve => {
+        const url = URL.createObjectURL(file);
+        const img = new Image();
+        img.onerror = () => { URL.revokeObjectURL(url); toast('error', tr('could not read the chosen picture')); resolve(null); };
+        img.onload = () => run(img);
+        img.src = url;
+
+        function run(img) {
+            cropOpen = true;
+            const OUT_W = 512, OUT_H = 768;
+            const iw = img.naturalWidth, ih = img.naturalHeight;
+            const vw = Math.max(160, Math.min(320, window.innerWidth - 64, Math.floor((window.innerHeight - 300) * 2 / 3)));
+            const vh = Math.round(vw * 1.5);
+            const dpr = Math.min(window.devicePixelRatio || 1, 2);
+            const cover = Math.max(vw / iw, vh / ih);
+            const minZ = Math.min(1, Math.min(vw / iw, vh / ih) / cover);
+            const maxZ = 6;
+            let z = 1, cx = vw / 2, cy = vh / 2;
+
+            const canvas = h('canvas', { class: 'bim-crop-canvas', width: Math.round(vw * dpr), height: Math.round(vh * dpr) });
+            canvas.style.width = `${vw}px`;
+            canvas.style.height = `${vh}px`;
+            const ctx = canvas.getContext('2d');
+            const slider = h('input', { type: 'range', class: 'bim-crop-zoom', min: String(minZ), max: String(maxZ), step: '0.01', value: '1', 'aria-label': tr('Zoom') });
+
+            const size = () => ({ dw: iw * cover * z, dh: ih * cover * z });
+            const clamp = () => {
+                const { dw, dh } = size();
+                cx = dw >= vw ? Math.min(dw / 2, Math.max(vw - dw / 2, cx)) : vw / 2;
+                cy = dh >= vh ? Math.min(dh / 2, Math.max(vh - dh / 2, cy)) : vh / 2;
+            };
+            const paint = (c, kx, ky) => {
+                const { dw, dh } = size();
+                c.setTransform(kx, 0, 0, ky, 0, 0);
+                c.clearRect(0, 0, vw, vh);
+                c.imageSmoothingQuality = 'high';
+                c.drawImage(img, cx - dw / 2, cy - dh / 2, dw, dh);
+            };
+            const draw = () => paint(ctx, canvas.width / vw, canvas.height / vh);
+            const zoomAt = (nz, px, py) => {
+                nz = Math.min(maxZ, Math.max(minZ, nz));
+                const ratio = nz / z;
+                cx = px - (px - cx) * ratio;
+                cy = py - (py - cy) * ratio;
+                z = nz;
+                clamp();
+                slider.value = String(z);
+                draw();
+            };
+            const reset = () => {
+                z = 1;
+                const { dh } = size();
+                cx = vw / 2;
+                cy = dh > vh ? dh / 2 - (dh - vh) * 0.2 : vh / 2;   // keep the top of tall pictures (faces)
+                clamp();
+                slider.value = '1';
+                draw();
+            };
+            const showAll = () => { cx = vw / 2; cy = vh / 2; zoomAt(minZ, vw / 2, vh / 2); };
+
+            const pts = new Map();
+            canvas.addEventListener('pointerdown', e => { canvas.setPointerCapture(e.pointerId); pts.set(e.pointerId, { x: e.clientX, y: e.clientY }); });
+            canvas.addEventListener('pointermove', e => {
+                const prev = pts.get(e.pointerId);
+                if (!prev) return;
+                const cur = { x: e.clientX, y: e.clientY };
+                if (pts.size === 1) {
+                    cx += cur.x - prev.x;
+                    cy += cur.y - prev.y;
+                    clamp();
+                    draw();
+                } else if (pts.size === 2) {
+                    const other = [...pts.entries()].find(([id]) => id !== e.pointerId)[1];
+                    const d0 = Math.hypot(prev.x - other.x, prev.y - other.y);
+                    const d1 = Math.hypot(cur.x - other.x, cur.y - other.y);
+                    const r = canvas.getBoundingClientRect();
+                    if (d0 > 0) zoomAt(z * (d1 / d0), (cur.x + other.x) / 2 - r.left, (cur.y + other.y) / 2 - r.top);
+                }
+                pts.set(e.pointerId, cur);
+            });
+            const lift = e => pts.delete(e.pointerId);
+            canvas.addEventListener('pointerup', lift);
+            canvas.addEventListener('pointercancel', lift);
+            canvas.addEventListener('wheel', e => {
+                e.preventDefault();
+                const r = canvas.getBoundingClientRect();
+                zoomAt(z * (e.deltaY < 0 ? 1.1 : 1 / 1.1), e.clientX - r.left, e.clientY - r.top);
+            }, { passive: false });
+            slider.addEventListener('input', () => zoomAt(Number(slider.value), vw / 2, vh / 2));
+
+            const view = h('div', { class: 'bim-crop-view' }, canvas, h('div', { class: 'bim-crop-grid' }));
+            view.style.width = `${vw}px`;
+            view.style.height = `${vh}px`;
+
+            const mk = (icon, label, fn, cls = '') => h('button', { type: 'button', class: `bim-btn ${cls}`, onclick: fn }, h('i', { class: `fa-solid ${icon}` }), label);
+            const box = h('div', { id: 'bim-crop' }, h('div', { class: 'bim-crop-panel', role: 'dialog', 'aria-modal': 'true', 'aria-label': tr('Crop profile picture') },
+                h('div', { class: 'bim-crop-title' }, tr('Crop profile picture')),
+                view,
+                h('p', { class: 'bim-crop-hint' }, tr('Drag to move. Pinch, scroll or use the slider to zoom.')),
+                h('div', { class: 'bim-crop-zoomrow' }, h('i', { class: 'fa-solid fa-magnifying-glass-minus' }), slider, h('i', { class: 'fa-solid fa-magnifying-glass-plus' })),
+                h('div', { class: 'bim-row bim-crop-actions' }, mk('fa-rotate-left', tr('Reset'), reset), mk('fa-expand', tr('Show whole image'), showAll)),
+                h('div', { class: 'bim-row bim-crop-actions' }, mk('fa-xmark', tr('Cancel'), () => close(null)), mk('fa-check', tr('Apply crop'), () => apply(), 'primary'))));
+
+            const onKey = e => {
+                if (e.key !== 'Escape') return;
+                e.stopPropagation();
+                close(null);
+            };
+            function close(result) {
+                document.removeEventListener('keydown', onKey, true);
+                box.remove();
+                URL.revokeObjectURL(url);
+                cropOpen = false;
+                resolve(result);
+            }
+            async function apply() {
+                const out = document.createElement('canvas');
+                out.width = OUT_W;
+                out.height = OUT_H;
+                paint(out.getContext('2d'), OUT_W / vw, OUT_H / vh);
+                const blob = await new Promise(r => out.toBlob(r, 'image/png'));
+                close(blob ? new File([blob], 'avatar.png', { type: 'image/png' }) : null);
+            }
+
+            document.addEventListener('keydown', onKey, true);
+            document.body.append(box);
+            reset();
+        }
+    });
 }
 
 function renderTags(it) {
@@ -409,7 +564,7 @@ function createCard(it) {
     sel.addEventListener('change', () => { it.selected = sel.checked; it.userToggled = true; it.el.classList.toggle('unsel', !it.selected); updateFooter(); });
 
     const picker = h('input', { type: 'file', accept: 'image/*', hidden: true });
-    picker.addEventListener('change', () => { const f = picker.files[0]; picker.value = ''; if (f) setAvatar(it, f); });
+    picker.addEventListener('change', () => { const f = picker.files[0]; picker.value = ''; if (f) chooseAvatar(it, f); });
 
     const avatar = h('div', { class: 'bim-avatar', role: 'button', tabindex: '0', title: tr('Change profile picture') },
         h('span', { class: 'bim-letter' }), h('span', { class: 'bim-cam' }, h('i', { class: 'fa-solid fa-camera' })));
@@ -420,8 +575,11 @@ function createCard(it) {
     avatar.addEventListener('drop', e => {
         e.preventDefault(); e.stopPropagation(); avatar.classList.remove('over');
         const f = [...(e.dataTransfer?.files || [])].find(x => x.type.startsWith('image/'));
-        if (f) setAvatar(it, f);
+        if (f) chooseAvatar(it, f);
     });
+
+    const cropBtn = h('button', { type: 'button', class: 'bim-crop-btn', title: tr('Crop picture'), 'aria-label': tr('Crop picture'), hidden: true }, h('i', { class: 'fa-solid fa-crop-simple' }));
+    cropBtn.addEventListener('click', () => recrop(it));
 
     const reset = h('button', { type: 'button', class: 'bim-reset', title: tr('Go back to the original picture'), hidden: true }, h('i', { class: 'fa-solid fa-rotate-left' }));
     reset.addEventListener('click', () => setAvatar(it, null));
@@ -447,7 +605,7 @@ function createCard(it) {
 
     it.el = h('article', { class: 'bim-card' },
         h('div', { class: 'bim-card-top' },
-            h('div', { class: 'bim-avatar-wrap' }, avatar, reset, picker),
+            h('div', { class: 'bim-avatar-wrap' }, avatar, cropBtn, reset, picker),
             h('div', { class: 'bim-info' },
                 h('label', { class: 'bim-namerow' }, sel, h('span', { class: 'bim-name', title: it.name }, it.name)),
                 h('div', { class: 'bim-badges' },
@@ -605,7 +763,8 @@ async function importItem(it) {
     const metaChanged = it.world !== '' || !sameTags(it.tags, it.originalTags);
     let file, type;
     if (it.newAvatar) {
-        const chunks = writeCardChunks(readPng(await imageToAvatarPng(it.newAvatar)), it.raw, it.hadV3);
+        const pngBuf = it.avatarCropped ? await it.newAvatar.arrayBuffer() : await imageToAvatarPng(it.newAvatar);
+        const chunks = writeCardChunks(readPng(pngBuf), it.raw, it.hadV3);
         file = new File([writePng(chunks)], `${base}.png`, { type: 'image/png' });
         type = 'png';
     } else if (it.kind === 'png' && metaChanged) {
@@ -806,7 +965,7 @@ function buildModal() {
     document.body.append(overlay);
     if (!escBound) {
         escBound = true;
-        document.addEventListener('keydown', e => { if (e.key === 'Escape' && overlay?.classList.contains('open')) closeModal(); });
+        document.addEventListener('keydown', e => { if (e.key === 'Escape' && !cropOpen && overlay?.classList.contains('open')) closeModal(); });
     }
 }
 
@@ -883,6 +1042,7 @@ function mountSettings() {
                     <input id="bim_sim" type="range" min="30" max="95" step="1" value="${c.similarThreshold}">
                 </label>
                 <label class="checkbox_label"><input id="bim_auto" type="checkbox" ${c.autoSkipExact ? 'checked' : ''}><span>${tr('Untick exact duplicates automatically')}</span></label>
+                <label class="checkbox_label"><input id="bim_crop" type="checkbox" ${c.askCrop ? 'checked' : ''}><span>${tr('Open the cropper when choosing a picture')}</span></label>
                 <label class="checkbox_label"><input id="bim_ignore" type="checkbox" ${c.ignoreCardTags ? 'checked' : ''}><span>${tr('Ignore tags that come with the cards')}</span></label>
                 <label class="bim-set">${tr('Always ignore these tags (separated by commas)')}
                     <input id="bim_ignored" type="text" class="text_pole" autocomplete="off">
@@ -900,6 +1060,7 @@ function mountSettings() {
     bindRange('#bim_dup', '#bim_dup_val', 'dupThreshold');
     bindRange('#bim_sim', '#bim_sim_val', 'similarThreshold');
     wrap.querySelector('#bim_auto').addEventListener('change', e => { cfg().autoSkipExact = e.target.checked; save(); });
+    wrap.querySelector('#bim_crop').addEventListener('change', e => { cfg().askCrop = e.target.checked; save(); });
     wrap.querySelector('#bim_ignore').addEventListener('change', e => setIgnoreAll(e.target.checked));
     const ignored = wrap.querySelector('#bim_ignored');
     ignored.value = c.ignoredTags || '';

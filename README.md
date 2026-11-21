@@ -46,12 +46,23 @@ The extension is available in English and Russian. By default it follows your Si
 
 1. Drop PNG or JSON cards on the window, or tap the drop area to browse. Pick as many as you like.
 2. On each card:
-   - tap the picture to choose a new profile picture (or drop an image on it)
+   - tap the picture to choose a new profile picture (or drop an image on it), then crop it
    - add or remove tags (type, then Enter or comma)
    - choose a main lorebook, or leave the card's own setting
    - add any number of additional lorebooks
 3. Use the bulk bar to work on all selected cards at once (see below).
 4. Press **Import**. Imported cards leave the list; failed ones stay with the reason.
+
+## Cropping pictures
+
+When you choose or drop a picture on a card, a cropper opens with a 2:3 frame.
+
+- drag to move the picture
+- pinch, scroll the mouse wheel, or use the slider to zoom (you can zoom out until the whole picture fits)
+- **Show whole image** fits everything in the frame, **Reset** goes back to the starting crop
+- **Apply crop** saves it, **Cancel** keeps the previous picture
+
+The small crop button on a card's picture reopens the cropper, starting from the picture you originally chose (or the card's own image). If you prefer no cropper, untick **Open the cropper when choosing a picture** in the Extensions panel; pictures are then cropped automatically to the centre, keeping the top.
 
 ## Bulk bar
 
@@ -83,7 +94,7 @@ Open **Compare intro messages** on a banner to read both intros side by side. Th
 
 ## Notes
 
-- A new profile picture is cropped to 512×768 (2:3), keeping the top of the image. The card data is embedded in the new PNG.
+- Profile pictures end up 512×768 (2:3). The card data is embedded in the new PNG.
 - The main lorebook is saved as the card's linked lorebook. Additional lorebooks are saved in SillyTavern's lorebook settings for that character. Lorebooks must already exist in SillyTavern.
 - Tags are added to SillyTavern's tag list and also written into the card.
 - The first duplicate check on a large library takes a moment while it is indexed. After that it is cached until you reload the page.

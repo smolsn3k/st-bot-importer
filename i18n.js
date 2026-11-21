@@ -138,6 +138,17 @@ export const RU = {
     'Import': 'Импорт',
     'Bulk import with Bot Importer': 'Массовый импорт через Bot Importer',
 
+    /* cropper */
+    'Crop picture': 'Обрезать картинку',
+    'Crop profile picture': 'Обрезка аватара',
+    'Drag to move. Pinch, scroll or use the slider to zoom.': 'Перетаскивайте, чтобы сдвинуть. Масштаб: щипок, колесо мыши или ползунок.',
+    'Zoom': 'Масштаб',
+    'Reset': 'Сбросить',
+    'Show whole image': 'Показать целиком',
+    'Cancel': 'Отмена',
+    'Apply crop': 'Применить',
+    'Open the cropper when choosing a picture': 'Открывать обрезку при выборе картинки',
+
     /* settings panel */
     'Open Bot Importer': 'Открыть Bot Importer',
     'Duplicate threshold:': 'Порог дубликата:',
