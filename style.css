@@ -350,3 +350,22 @@ body.bim-lock { overflow: hidden; }
 .bim-pool-chip:hover { border-color: var(--bim-red); }
 .bim-pool-n { opacity: 0.6; }
 .bim-pool-chip i { font-size: 10px; opacity: 0.7; }
+
+/* Language switch in the header */
+.bim-lang {
+    margin-left: auto;
+    flex: none;
+    min-width: 44px;
+    height: 40px;
+    padding: 0 12px;
+    border: 1px solid var(--bim-line);
+    border-radius: 12px;
+    background: var(--bim-soft);
+    color: inherit;
+    font: inherit;
+    font-size: 0.85em;
+    font-weight: 600;
+    cursor: pointer;
+}
+.bim-lang:hover { background: var(--bim-soft2); }
+.bim-lang + .bim-close { margin-left: 0; }

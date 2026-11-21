@@ -5,9 +5,10 @@ import { extension_settings } from '../../../extensions.js';
 import * as ST from '../../../../script.js';
 import * as TAGS from '../../../tags.js';
 import { readPng, writePng, extractCard, normalizeCard, writeCardChunks, makeSig, evaluate } from './lib.js';
+import { RU, PL, pluralIndex } from './i18n.js';
 
 const MODULE = 'bot_importer';
-const DEFAULTS = { dupThreshold: 85, similarThreshold: 60, autoSkipExact: true, ignoreCardTags: false, ignoredTags: '' };
+const DEFAULTS = { dupThreshold: 85, similarThreshold: 60, autoSkipExact: true, ignoreCardTags: false, ignoredTags: '', language: 'auto' };
 const RANK = { exact: 4, alt: 3, intro: 3, similar: 2, name: 1 };
 
 const items = [];
@@ -17,6 +18,7 @@ let uid = 0;
 let busy = false;
 let worlds = [];
 let overlay = null;
+let escBound = false;
 
 /* ---------- small utilities ---------- */
 
@@ -26,6 +28,31 @@ function cfg() {
     return s;
 }
 const save = () => ST.saveSettingsDebounced?.();
+
+/* ---------- language ---------- */
+
+function curLang() {
+    const v = cfg().language;
+    if (v === 'ru' || v === 'en') return v;
+    let l = '';
+    try { l = localStorage.getItem('language') || ''; } catch { /* ignore */ }
+    l = (l || navigator.language || 'en').toLowerCase();
+    return l.startsWith('ru') ? 'ru' : 'en';
+}
+
+/** Translates an English source string. Placeholders like {name} are filled from vars. */
+function tr(key, vars) {
+    let out = (curLang() === 'ru' && RU[key]) || key;
+    if (vars) out = out.replace(/\{(\w+)\}/g, (m, k) => (vars[k] ?? m));
+    return out;
+}
+
+/** Translates a phrase with a number in it, choosing the right plural form. */
+function tp(key, n, vars = {}) {
+    const lang = curLang();
+    const forms = PL[key][lang] || PL[key].en;
+    return forms[pluralIndex(lang, n)].replace(/\{(\w+)\}/g, (m, k) => (k === 'n' ? n : (vars[k] ?? m)));
+}
 const toast = (type, msg) => { try { window.toastr?.[type]?.(msg); } catch { /* ignore */ } };
 const tick = () => new Promise(r => setTimeout(r, 0));
 const pct = x => `${Math.round(x * 100)}%`;
@@ -105,7 +132,7 @@ async function ensureIndex() {
             const c = todo.pop();
             libIndex.set(c.avatar, entryFrom(await fullChar(c)));
             done++;
-            if (done % 10 === 0 || done === total) setStatus(`Indexing your library for duplicate checks: ${done} of ${total}`);
+            if (done % 10 === 0 || done === total) setStatus(tr('Indexing your library for duplicate checks: {done} of {total}', { done, total }));
         }
     };
     await Promise.all(Array.from({ length: 6 }, worker));
@@ -120,17 +147,17 @@ async function parseFile(file) {
     if (ext === 'png') {
         chunks = readPng(await file.arrayBuffer());
         const found = extractCard(chunks);
-        if (!found) throw new Error('no character data inside this PNG');
+        if (!found) throw new Error(tr('no character data inside this PNG'));
         json = found.json;
         hadV3 = found.hadV3;
     } else if (ext === 'json') {
-        try { json = JSON.parse(await file.text()); } catch { throw new Error('not valid JSON'); }
+        try { json = JSON.parse(await file.text()); } catch { throw new Error(tr('not valid JSON')); }
     } else {
-        throw new Error('unsupported file type');
+        throw new Error(tr('unsupported file type'));
     }
     const raw = normalizeCard(json);
     const card = raw.data;
-    if (!card.name && !card.description && !card.first_mes) throw new Error('this does not look like a character card');
+    if (!card.name && !card.description && !card.first_mes) throw new Error(tr('this does not look like a character card'));
     if (!card.name) card.name = base;
     return {
         id: ++uid, file, kind: ext, chunks, hadV3: hadV3 || raw.spec === 'chara_card_v3', raw,
@@ -148,7 +175,7 @@ async function runChecks(fresh) {
     const c = cfg();
     try {
         if (fresh?.length) {
-            setStatus('Checking your library for duplicates…');
+            setStatus(tr('Checking your library for duplicates…'));
             await ensureIndex();
             const lib = [...libIndex.values()];
             let n = 0;
@@ -164,7 +191,7 @@ async function runChecks(fresh) {
         await recomputeBatch();
     } catch (e) {
         console.error('[BotImporter] duplicate check failed', e);
-        toast('error', 'Duplicate check failed. See the browser console for details.');
+        toast('error', tr('Duplicate check failed. See the browser console for details.'));
     }
     setStatus('');
 }
@@ -232,7 +259,7 @@ function renderTags(it) {
     const input = box.querySelector('input');
     box.querySelectorAll('.bim-chip').forEach(n => n.remove());
     for (const t of it.tags) {
-        const x = h('button', { type: 'button', title: 'Remove tag', 'aria-label': `Remove tag ${t}` }, '×');
+        const x = h('button', { type: 'button', title: tr('Remove tag'), 'aria-label': tr('Remove tag {t}', { t }) }, '×');
         x.addEventListener('click', () => { it.tags = it.tags.filter(v => v !== t); renderTags(it); });
         box.insertBefore(h('span', { class: 'bim-chip' }, t, x), input);
     }
@@ -268,7 +295,7 @@ function refreshPool() {
     els.pool.replaceChildren(...[...counts.values()]
         .sort((a, b) => b.n - a.n || a.name.localeCompare(b.name))
         .map(({ name, n }) => {
-            const b = h('button', { type: 'button', class: 'bim-pool-chip', title: `Remove "${name}" from ${n} selected card${n > 1 ? 's' : ''}` },
+            const b = h('button', { type: 'button', class: 'bim-pool-chip', title: tp('poolTitle', n, { name }) },
                 name, h('span', { class: 'bim-pool-n' }, String(n)), h('i', { class: 'fa-solid fa-xmark' }));
             b.addEventListener('click', () => removeTags(items.filter(i => i.selected), [name]));
             return b;
@@ -308,7 +335,7 @@ function setIgnoreAll(v) {
 function renderExtras(it) {
     const box = it.el.querySelector('.bim-extras');
     box.replaceChildren(...it.extras.map(w => {
-        const x = h('button', { type: 'button', title: 'Remove lorebook', 'aria-label': `Remove lorebook ${w}` }, '×');
+        const x = h('button', { type: 'button', title: tr('Remove lorebook'), 'aria-label': tr('Remove lorebook {w}', { w }) }, '×');
         x.addEventListener('click', () => { it.extras = it.extras.filter(v => v !== w); renderExtras(it); fillExtraSel(it); });
         return h('span', { class: 'bim-chip' }, w, x);
     }));
@@ -318,7 +345,7 @@ function renderExtras(it) {
 function fillExtraSel(it) {
     const sel = it.el.querySelector('.bim-extra-sel');
     sel.replaceChildren(
-        h('option', { value: '' }, 'Add a lorebook'),
+        h('option', { value: '' }, tr('Add a lorebook')),
         ...worlds.filter(w => !it.extras.includes(w)).map(w => h('option', { value: w }, w)));
     sel.value = '';
 }
@@ -333,8 +360,8 @@ function fillWorld(it) {
     const sel = it.el.querySelector('.bim-world');
     const own = it.raw.data.extensions?.world;
     sel.replaceChildren(
-        h('option', { value: '' }, own ? `Keep the card’s lorebook (${own})` : 'Keep the card’s setting'),
-        h('option', { value: '__none__' }, 'No linked lorebook'),
+        h('option', { value: '' }, own ? tr('Keep the card’s lorebook ({own})', { own }) : tr('Keep the card’s setting')),
+        h('option', { value: '__none__' }, tr('No linked lorebook')),
         ...worlds.map(w => h('option', { value: w }, w)),
     );
     sel.value = it.world;
@@ -342,19 +369,19 @@ function fillWorld(it) {
 }
 
 function cmpCol(title, text) {
-    return h('div', {}, h('div', { class: 'bim-cmp-title' }, title), h('div', { class: 'bim-cmp-col' }, String(text || '').trim() || '(empty)'));
+    return h('div', {}, h('div', { class: 'bim-cmp-title' }, title), h('div', { class: 'bim-cmp-col' }, String(text || '').trim() || tr('(empty)')));
 }
 
 function dupEl(it, m) {
-    const where = m.src === 'lib' ? 'In your library' : 'In this batch';
+    const where = m.src === 'lib' ? tr('In your library') : tr('In this batch');
     const body = h('div', { class: 'bim-dup-body' },
-        h('div', { class: 'bim-dup-title' }, m.label),
-        h('div', { class: 'bim-dup-sub' }, `${where}: `, h('b', {}, m.name || '(no name)'),
-            m.level === 'name' ? '' : `, description ${pct(m.d)}, intro ${pct(m.i)}`));
+        h('div', { class: 'bim-dup-title' }, tr(m.label)),
+        h('div', { class: 'bim-dup-sub' }, `${where}: `, h('b', {}, m.name || tr('(no name)')),
+            m.level === 'name' ? '' : tr(', description {d}, intro {i}', { d: pct(m.d), i: pct(m.i) })));
     if (m.level !== 'name') {
         body.append(h('details', { class: 'bim-cmp' },
-            h('summary', {}, 'Compare intro messages'),
-            h('div', { class: 'bim-cmp-grid' }, cmpCol('This card', it.raw.data.first_mes), cmpCol(m.name || 'Match', m.intro))));
+            h('summary', {}, tr('Compare intro messages')),
+            h('div', { class: 'bim-cmp-grid' }, cmpCol(tr('This card'), it.raw.data.first_mes), cmpCol(m.name || tr('Match'), m.intro))));
     }
     return h('div', { class: `bim-dup lvl-${m.level}` }, m.thumb ? h('img', { src: m.thumb, alt: '', loading: 'lazy' }) : null, body);
 }
@@ -371,20 +398,20 @@ function renderState(it) {
     it.el.classList.toggle('is-error', it.status === 'error');
     s.hidden = it.status === 'ready';
     s.replaceChildren();
-    if (it.status === 'importing') s.append(h('i', { class: 'fa-solid fa-spinner fa-spin' }), ' Importing…');
-    else if (it.status === 'done') s.append(h('i', { class: 'fa-solid fa-check' }), ' Imported');
-    else if (it.status === 'error') s.append(h('i', { class: 'fa-solid fa-triangle-exclamation' }), ` Failed: ${it.error}`);
+    if (it.status === 'importing') s.append(h('i', { class: 'fa-solid fa-spinner fa-spin' }), tr(' Importing…'));
+    else if (it.status === 'done') s.append(h('i', { class: 'fa-solid fa-check' }), tr(' Imported'));
+    else if (it.status === 'error') s.append(h('i', { class: 'fa-solid fa-triangle-exclamation' }), tr(' Failed: {error}', { error: it.error }));
 }
 
 function createCard(it) {
     const d = it.raw.data;
-    const sel = h('input', { type: 'checkbox', class: 'bim-sel', checked: it.selected, 'aria-label': `Import ${it.name}` });
+    const sel = h('input', { type: 'checkbox', class: 'bim-sel', checked: it.selected, 'aria-label': tr('Import {name}', { name: it.name }) });
     sel.addEventListener('change', () => { it.selected = sel.checked; it.userToggled = true; it.el.classList.toggle('unsel', !it.selected); updateFooter(); });
 
     const picker = h('input', { type: 'file', accept: 'image/*', hidden: true });
     picker.addEventListener('change', () => { const f = picker.files[0]; picker.value = ''; if (f) setAvatar(it, f); });
 
-    const avatar = h('div', { class: 'bim-avatar', role: 'button', tabindex: '0', title: 'Change profile picture' },
+    const avatar = h('div', { class: 'bim-avatar', role: 'button', tabindex: '0', title: tr('Change profile picture') },
         h('span', { class: 'bim-letter' }), h('span', { class: 'bim-cam' }, h('i', { class: 'fa-solid fa-camera' })));
     avatar.addEventListener('click', () => picker.click());
     avatar.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); picker.click(); } });
@@ -396,10 +423,10 @@ function createCard(it) {
         if (f) setAvatar(it, f);
     });
 
-    const reset = h('button', { type: 'button', class: 'bim-reset', title: 'Go back to the original picture', hidden: true }, h('i', { class: 'fa-solid fa-rotate-left' }));
+    const reset = h('button', { type: 'button', class: 'bim-reset', title: tr('Go back to the original picture'), hidden: true }, h('i', { class: 'fa-solid fa-rotate-left' }));
     reset.addEventListener('click', () => setAvatar(it, null));
 
-    const tagInput = h('input', { type: 'text', class: 'bim-tag-input', placeholder: 'Add a tag', list: 'bim-taglist', enterkeyhint: 'done', autocomplete: 'off', autocapitalize: 'none' });
+    const tagInput = h('input', { type: 'text', class: 'bim-tag-input', placeholder: tr('Add a tag'), list: 'bim-taglist', enterkeyhint: 'done', autocomplete: 'off', autocapitalize: 'none' });
     const commit = () => { if (tagInput.value.trim()) { addTags(it, tagInput.value); tagInput.value = ''; } };
     tagInput.addEventListener('keydown', e => {
         if (e.key === 'Enter' || e.key === ',') { e.preventDefault(); commit(); }
@@ -409,10 +436,10 @@ function createCard(it) {
     tagInput.addEventListener('change', commit);
     tagInput.addEventListener('blur', commit);
 
-    const worldSel = h('select', { class: 'bim-world', 'aria-label': 'Lorebook' });
+    const worldSel = h('select', { class: 'bim-world', 'aria-label': tr('Lorebook') });
     worldSel.addEventListener('change', () => { it.world = worldSel.value; });
 
-    const extraSel = h('select', { class: 'bim-extra-sel', 'aria-label': 'Add an additional lorebook' });
+    const extraSel = h('select', { class: 'bim-extra-sel', 'aria-label': tr('Add an additional lorebook') });
     extraSel.addEventListener('change', () => { if (extraSel.value) addExtra(it, extraSel.value); extraSel.value = ''; });
 
     const alts = d.alternate_greetings.length;
@@ -424,15 +451,15 @@ function createCard(it) {
             h('div', { class: 'bim-info' },
                 h('label', { class: 'bim-namerow' }, sel, h('span', { class: 'bim-name', title: it.name }, it.name)),
                 h('div', { class: 'bim-badges' },
-                    h('span', { class: 'bim-badge' }, it.kind === 'png' ? 'PNG card' : 'JSON card'),
-                    alts ? h('span', { class: 'bim-badge' }, `${alts} extra greeting${alts > 1 ? 's' : ''}`) : null,
-                    d.character_book ? h('span', { class: 'bim-badge' }, 'Has its own lorebook') : null),
-                h('p', { class: 'bim-snippet' }, snippet || 'No description')),
-            h('button', { type: 'button', class: 'bim-x', title: 'Remove from this list', 'aria-label': `Remove ${it.name} from the list`, onclick: () => removeItem(it) }, h('i', { class: 'fa-solid fa-xmark' }))),
+                    h('span', { class: 'bim-badge' }, it.kind === 'png' ? tr('PNG card') : tr('JSON card')),
+                    alts ? h('span', { class: 'bim-badge' }, tp('greetN', alts)) : null,
+                    d.character_book ? h('span', { class: 'bim-badge' }, tr('Has its own lorebook')) : null),
+                h('p', { class: 'bim-snippet' }, snippet || tr('No description'))),
+            h('button', { type: 'button', class: 'bim-x', title: tr('Remove from this list'), 'aria-label': tr('Remove {name} from the list', { name: it.name }), onclick: () => removeItem(it) }, h('i', { class: 'fa-solid fa-xmark' }))),
         h('div', { class: 'bim-dups' }),
-        h('div', { class: 'bim-field' }, h('span', { class: 'bim-lbl' }, h('i', { class: 'fa-solid fa-tags' }), 'Tags'), h('div', { class: 'bim-chips' }, tagInput)),
-        h('div', { class: 'bim-field' }, h('span', { class: 'bim-lbl' }, h('i', { class: 'fa-solid fa-book' }), 'Main lorebook'), worldSel),
-        h('div', { class: 'bim-field' }, h('span', { class: 'bim-lbl' }, h('i', { class: 'fa-solid fa-book-bookmark' }), 'Additional lorebooks'), h('div', { class: 'bim-extras', hidden: true }), extraSel),
+        h('div', { class: 'bim-field' }, h('span', { class: 'bim-lbl' }, h('i', { class: 'fa-solid fa-tags' }), tr('Tags')), h('div', { class: 'bim-chips' }, tagInput)),
+        h('div', { class: 'bim-field' }, h('span', { class: 'bim-lbl' }, h('i', { class: 'fa-solid fa-book' }), tr('Main lorebook')), worldSel),
+        h('div', { class: 'bim-field' }, h('span', { class: 'bim-lbl' }, h('i', { class: 'fa-solid fa-book-bookmark' }), tr('Additional lorebooks')), h('div', { class: 'bim-extras', hidden: true }), extraSel),
         h('div', { class: 'bim-state', hidden: true }));
 
     renderAvatar(it); renderTags(it); renderExtras(it); fillWorld(it); renderDups(it); renderState(it); syncSel(it);
@@ -463,13 +490,13 @@ async function refreshWorlds() {
     for (const it of items) fillWorld(it);
     if (els.bulkExtra) {
         els.bulkExtra.replaceChildren(
-            h('option', { value: '' }, 'Add an additional lorebook'),
+            h('option', { value: '' }, tr('Add an additional lorebook')),
             ...worlds.map(w => h('option', { value: w }, w)));
     }
     if (els.bulkWorld) {
         els.bulkWorld.replaceChildren(
-            h('option', { value: '' }, 'Choose a lorebook'),
-            h('option', { value: '__none__' }, 'No linked lorebook'),
+            h('option', { value: '' }, tr('Choose a lorebook')),
+            h('option', { value: '__none__' }, tr('No linked lorebook')),
             ...worlds.map(w => h('option', { value: w }, w)));
     }
 }
@@ -483,19 +510,19 @@ function refreshTagList() {
 /* ---------- adding files ---------- */
 
 async function addFiles(files) {
-    if (busy) { toast('info', 'Wait for the current import to finish.'); return; }
+    if (busy) { toast('info', tr('Wait for the current import to finish.')); return; }
     const list = files.filter(f => /\.(png|json)$/i.test(f.name));
-    if (files.length - list.length) toast('warning', `${files.length - list.length} file(s) skipped. Only .png and .json cards work here.`);
+    if (files.length - list.length) toast('warning', tp('skipN', files.length - list.length));
     if (!list.length) return;
-    setStatus(`Reading ${list.length} file${list.length > 1 ? 's' : ''}…`);
+    setStatus(tp('readN', list.length));
     const fresh = [];
     const errors = [];
     for (const f of list) {
-        try { fresh.push(await parseFile(f)); } catch (e) { errors.push(`${f.name}: ${e.message}`); }
+        try { fresh.push(await parseFile(f)); } catch (e) { errors.push(`${f.name}: ${tr(e.message)}`); }
     }
     for (const it of fresh) { items.push(it); els.grid.append(createCard(it)); }
     updateFooter();
-    if (errors.length) toast('error', errors.slice(0, 4).join('; ') + (errors.length > 4 ? `; and ${errors.length - 4} more` : ''));
+    if (errors.length) toast('error', errors.slice(0, 4).join('; ') + (errors.length > 4 ? tr('; and {n} more', { n: errors.length - 4 }) : ''));
     refreshTagList();
     await runChecks(fresh);
 }
@@ -508,7 +535,7 @@ async function imageToAvatarPng(file) {
         const img = await new Promise((res, rej) => {
             const i = new Image();
             i.onload = () => res(i);
-            i.onerror = () => rej(new Error('could not read the chosen picture'));
+            i.onerror = () => rej(new Error(tr('could not read the chosen picture')));
             i.src = url;
         });
         const W = 512, H = 768;
@@ -518,7 +545,7 @@ async function imageToAvatarPng(file) {
         const sw = W / scale, sh = H / scale;
         canvas.getContext('2d').drawImage(img, (img.naturalWidth - sw) / 2, (img.naturalHeight - sh) * 0.2, sw, sh, 0, 0, W, H);
         const blob = await new Promise(r => canvas.toBlob(r, 'image/png'));
-        if (!blob) throw new Error('could not process the chosen picture');
+        if (!blob) throw new Error(tr('could not process the chosen picture'));
         return await blob.arrayBuffer();
     } finally {
         URL.revokeObjectURL(url);
@@ -534,9 +561,9 @@ async function uploadCharacter(file, type) {
     delete headers['Content-Type'];
     delete headers['content-type'];
     const r = await fetch('/api/characters/import', { method: 'POST', headers, body: fd, cache: 'no-cache' });
-    if (!r.ok) throw new Error(`the server answered ${r.status}`);
+    if (!r.ok) throw new Error(tr('the server answered {status}', { status: r.status }));
     const data = await r.json();
-    if (!data?.file_name) throw new Error('the server rejected this card');
+    if (!data?.file_name) throw new Error(tr('the server rejected this card'));
     return data.file_name;
 }
 
@@ -559,7 +586,7 @@ function applyTags(avatar, names) {
 async function applyExtraBooks(avatar, books) {
     const wi = await import('../../../world-info.js');
     const info = wi.world_info;
-    if (!info) throw new Error('lorebook settings are not reachable');
+    if (!info) throw new Error(tr('lorebook settings are not reachable'));
     const key = avatar.replace(/\.[^.]+$/, '');
     info.charLore ??= [];
     let entry = info.charLore.find(e => e.name === key);
@@ -598,7 +625,7 @@ async function importItem(it) {
             await applyExtraBooks(avatar, it.extras);
         } catch (e) {
             console.warn('[BotImporter] additional lorebooks failed', e);
-            toast('warning', `${it.name} was imported, but its additional lorebooks could not be set.`);
+            toast('warning', tr('{name} was imported, but its additional lorebooks could not be set.', { name: it.name }));
         }
     }
     return avatar;
@@ -641,9 +668,9 @@ async function doImport() {
     for (const it of queue.filter(i => i.status === 'done')) removeItem(it, true);
     busy = false;
     els.barWrap.hidden = true;
-    if (ok) toast('success', `Imported ${ok} bot${ok > 1 ? 's' : ''}${fail ? `, ${fail} failed` : ''}.`);
-    else toast('error', 'Nothing could be imported. Open the failed cards for details.');
-    setStatus(fail ? `${fail} card${fail > 1 ? 's' : ''} failed and stayed in the list.` : ok ? `Imported ${ok} bot${ok > 1 ? 's' : ''}. Add more or close this window.` : '');
+    if (ok) toast('success', tp('importedToast', ok) + (fail ? tr(', {fail} failed', { fail }) : '') + '.');
+    else toast('error', tr('Nothing could be imported. Open the failed cards for details.'));
+    setStatus(fail ? tp('failedN', fail) : ok ? tp('importedN', ok) : '');
     await recomputeBatch();
 }
 
@@ -660,17 +687,17 @@ function updateFooter() {
     const sel = items.filter(i => i.selected).length;
     const flagged = items.filter(i => ['exact', 'alt', 'intro'].includes(i.level)).length;
     els.summary.textContent = items.length
-        ? `${sel} of ${items.length} selected${flagged ? `, ${flagged} possible duplicate${flagged > 1 ? 's' : ''}` : ''}`
-        : 'No cards added yet';
+        ? tr('{sel} of {total} selected', { sel, total: items.length }) + (flagged ? tp('dupN', flagged) : '')
+        : tr('No cards added yet');
     els.importBtn.disabled = busy || !sel;
-    els.importLabel.textContent = sel ? `Import ${sel} bot${sel > 1 ? 's' : ''}` : 'Import';
+    els.importLabel.textContent = sel ? tp('importN', sel) : tr('Import');
     els.empty.hidden = items.length > 0;
     schedulePool();
 }
 
 function bulkTargets() {
     const t = items.filter(i => i.selected);
-    if (!t.length) toast('info', 'Select some cards first.');
+    if (!t.length) toast('info', tr('Select some cards first.'));
     return t;
 }
 
@@ -680,16 +707,16 @@ function buildModal() {
 
     const drop = h('div', { class: 'bim-drop', role: 'button', tabindex: '0' },
         h('i', { class: 'fa-solid fa-cloud-arrow-up' }),
-        h('div', { class: 'bim-drop-text' }, h('b', {}, 'Add character cards'), h('span', {}, 'Drop PNG or JSON files here, or tap to browse. You can pick as many as you like.')),
+        h('div', { class: 'bim-drop-text' }, h('b', {}, tr('Add character cards')), h('span', {}, tr('Drop PNG or JSON files here, or tap to browse. You can pick as many as you like.'))),
         fileInput);
     drop.addEventListener('click', e => { if (e.target !== fileInput) fileInput.click(); });
     drop.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fileInput.click(); } });
 
     els.status = h('div', { class: 'bim-status', hidden: true, 'aria-live': 'polite' });
     els.grid = h('div', { class: 'bim-grid' });
-    els.empty = h('div', { class: 'bim-empty' }, h('i', { class: 'fa-regular fa-folder-open' }), h('p', {}, 'Cards you add show up here. Set a picture, tags and a lorebook on each one, then import them together.'));
+    els.empty = h('div', { class: 'bim-empty' }, h('i', { class: 'fa-regular fa-folder-open' }), h('p', {}, tr('Cards you add show up here. Set a picture, tags and a lorebook on each one, then import them together.')));
 
-    els.bulkTag = h('input', { type: 'text', class: 'bim-input', placeholder: 'Tag for selected cards', list: 'bim-taglist', enterkeyhint: 'done', autocomplete: 'off', autocapitalize: 'none' });
+    els.bulkTag = h('input', { type: 'text', class: 'bim-input', placeholder: tr('Tag for selected cards'), list: 'bim-taglist', enterkeyhint: 'done', autocomplete: 'off', autocapitalize: 'none' });
     const applyBulkTag = () => {
         const v = els.bulkTag.value.trim();
         if (!v) return;
@@ -697,33 +724,33 @@ function buildModal() {
         if (!t.length) return;
         t.forEach(i => addTags(i, v));
         els.bulkTag.value = '';
-        toast('success', `Tag added to ${t.length} card${t.length > 1 ? 's' : ''}.`);
+        toast('success', tp('tagAddedN', t.length));
     };
     els.bulkTag.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); applyBulkTag(); } });
 
-    els.bulkWorld = h('select', { class: 'bim-input', 'aria-label': 'Lorebook for selected cards' });
+    els.bulkWorld = h('select', { class: 'bim-input', 'aria-label': tr('Lorebook for selected cards') });
     els.bulkWorld.addEventListener('change', () => {
         const v = els.bulkWorld.value;
         if (!v) return;
         const t = bulkTargets();
         t.forEach(i => { i.world = v; fillWorld(i); });
-        if (t.length) toast('success', `Lorebook set on ${t.length} card${t.length > 1 ? 's' : ''}.`);
+        if (t.length) toast('success', tp('lbSetN', t.length));
         els.bulkWorld.value = '';
     });
 
     const btn = (icon, label, fn, cls = '') => h('button', { type: 'button', class: `bim-btn ${cls}`, onclick: fn }, h('i', { class: `fa-solid ${icon}` }), label);
 
-    els.bulkExtra = h('select', { class: 'bim-input', 'aria-label': 'Additional lorebook for selected cards' });
+    els.bulkExtra = h('select', { class: 'bim-input', 'aria-label': tr('Additional lorebook for selected cards') });
     els.bulkExtra.addEventListener('change', () => {
         const v = els.bulkExtra.value;
         if (!v) return;
         const t = bulkTargets();
         t.forEach(i => addExtra(i, v));
-        if (t.length) toast('success', `Lorebook added to ${t.length} card${t.length > 1 ? 's' : ''}.`);
+        if (t.length) toast('success', tp('lbAddedN', t.length));
         els.bulkExtra.value = '';
     });
 
-    els.bulkRemove = h('input', { type: 'text', class: 'bim-input', placeholder: 'Tags to remove, separated by commas', enterkeyhint: 'done', autocomplete: 'off', autocapitalize: 'none' });
+    els.bulkRemove = h('input', { type: 'text', class: 'bim-input', placeholder: tr('Tags to remove, separated by commas'), enterkeyhint: 'done', autocomplete: 'off', autocapitalize: 'none' });
     const applyBulkRemove = () => {
         const names = els.bulkRemove.value.split(',').map(s => s.trim()).filter(Boolean);
         if (!names.length) return;
@@ -731,7 +758,7 @@ function buildModal() {
         if (!t.length) return;
         const n = removeTags(t, names);
         els.bulkRemove.value = '';
-        toast(n ? 'success' : 'info', n ? `Removed from ${n} card${n > 1 ? 's' : ''}.` : 'None of the selected cards had those tags.');
+        toast(n ? 'success' : 'info', n ? tp('removedN', n) : tr('None of the selected cards had those tags.'));
     };
     els.bulkRemove.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); applyBulkRemove(); } });
 
@@ -740,21 +767,21 @@ function buildModal() {
 
     els.pool = h('div', { class: 'bim-pool' });
     els.poolWrap = h('div', { class: 'bim-pool-wrap', hidden: true },
-        h('div', { class: 'bim-lbl' }, 'Tags on the selected cards. Tap one to remove it from all of them'), els.pool);
+        h('div', { class: 'bim-lbl' }, tr('Tags on the selected cards. Tap one to remove it from all of them')), els.pool);
 
     const bulk = h('div', { class: 'bim-bulk' },
         h('div', { class: 'bim-row' },
-            btn('fa-check-double', 'Select all', () => { items.forEach(i => { i.selected = true; i.userToggled = true; syncSel(i); }); updateFooter(); }),
-            btn('fa-square', 'Select none', () => { items.forEach(i => { i.selected = false; i.userToggled = true; syncSel(i); }); updateFooter(); }),
-            btn('fa-filter', 'Only unique', () => { items.forEach(i => { i.selected = !i.level || i.level === 'name'; i.userToggled = true; syncSel(i); }); updateFooter(); }),
-            btn('fa-trash-can', 'Clear list', () => { if (busy) return; [...items].forEach(i => removeItem(i, true)); updateFooter(); setStatus(''); })),
-        h('div', { class: 'bim-row' }, els.bulkTag, btn('fa-tag', 'Add tags', applyBulkTag)),
-        h('div', { class: 'bim-row' }, els.bulkRemove, btn('fa-eraser', 'Remove tags', applyBulkRemove)),
+            btn('fa-check-double', tr('Select all'), () => { items.forEach(i => { i.selected = true; i.userToggled = true; syncSel(i); }); updateFooter(); }),
+            btn('fa-square', tr('Select none'), () => { items.forEach(i => { i.selected = false; i.userToggled = true; syncSel(i); }); updateFooter(); }),
+            btn('fa-filter', tr('Only unique'), () => { items.forEach(i => { i.selected = !i.level || i.level === 'name'; i.userToggled = true; syncSel(i); }); updateFooter(); }),
+            btn('fa-trash-can', tr('Clear list'), () => { if (busy) return; [...items].forEach(i => removeItem(i, true)); updateFooter(); setStatus(''); })),
+        h('div', { class: 'bim-row' }, els.bulkTag, btn('fa-tag', tr('Add tags'), applyBulkTag)),
+        h('div', { class: 'bim-row' }, els.bulkRemove, btn('fa-eraser', tr('Remove tags'), applyBulkRemove)),
         els.poolWrap,
         h('div', { class: 'bim-row' }, els.bulkWorld, els.bulkExtra),
-        h('label', { class: 'bim-check' }, els.ignoreChk, h('span', {}, 'Ignore tags that come with the cards')));
+        h('label', { class: 'bim-check' }, els.ignoreChk, h('span', {}, tr('Ignore tags that come with the cards'))));
 
-    els.importLabel = h('span', {}, 'Import');
+    els.importLabel = h('span', {}, tr('Import'));
     els.importBtn = h('button', { type: 'button', class: 'bim-btn primary', onclick: doImport }, h('i', { class: 'fa-solid fa-file-import' }), els.importLabel);
     els.summary = h('div', { class: 'bim-summary' });
     els.bar = h('div', { class: 'bim-bar' });
@@ -763,8 +790,9 @@ function buildModal() {
     const modal = h('div', { class: 'bim-modal', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Bot Importer' },
         h('header', { class: 'bim-head' },
             h('div', { class: 'bim-logo' }, h('i', { class: 'fa-solid fa-boxes-packing' })),
-            h('div', {}, h('div', { class: 'bim-title' }, 'Bot Importer'), h('div', { class: 'bim-sub' }, 'Import many bots at once without opening each one')),
-            h('button', { type: 'button', class: 'bim-close', 'aria-label': 'Close', onclick: closeModal }, h('i', { class: 'fa-solid fa-xmark' }))),
+            h('div', {}, h('div', { class: 'bim-title' }, 'Bot Importer'), h('div', { class: 'bim-sub' }, tr('Import many bots at once without opening each one'))),
+            h('button', { type: 'button', class: 'bim-lang', title: tr('Language'), onclick: switchLang }, curLang() === 'ru' ? 'EN' : 'RU'),
+            h('button', { type: 'button', class: 'bim-close', 'aria-label': tr('Close'), onclick: closeModal }, h('i', { class: 'fa-solid fa-xmark' }))),
         h('div', { class: 'bim-body' }, drop, els.status, bulk, els.grid, els.empty),
         h('footer', { class: 'bim-foot' }, els.barWrap, els.summary, els.importBtn),
         h('datalist', { id: 'bim-taglist' }));
@@ -776,7 +804,10 @@ function buildModal() {
     overlay = h('div', { id: 'bim-overlay' }, modal);
     overlay.addEventListener('mousedown', e => { if (e.target === overlay) closeModal(); });
     document.body.append(overlay);
-    document.addEventListener('keydown', e => { if (e.key === 'Escape' && overlay.classList.contains('open')) closeModal(); });
+    if (!escBound) {
+        escBound = true;
+        document.addEventListener('keydown', e => { if (e.key === 'Escape' && overlay?.classList.contains('open')) closeModal(); });
+    }
 }
 
 async function openModal() {
@@ -797,9 +828,37 @@ function closeModal() {
 
 /* ---------- entry points and settings ---------- */
 
+function switchLang() {
+    cfg().language = curLang() === 'ru' ? 'en' : 'ru';
+    save();
+    rebuildUI();
+}
+
+/** Rebuilds every piece of UI text after a language change, keeping the staged cards. */
+function rebuildUI() {
+    const wasOpen = !!overlay?.classList.contains('open');
+    overlay?.remove();
+    overlay = null;
+    for (const k of Object.keys(els)) delete els[k];
+    mountSettings();
+    const b = document.getElementById('bim_char_btn');
+    if (b) b.title = tr('Bulk import with Bot Importer');
+    if (!wasOpen && !items.length) return;
+    buildModal();
+    for (const it of items) els.grid.append(createCard(it));
+    if (wasOpen) {
+        overlay.classList.add('open');
+        document.body.classList.add('bim-lock');
+    }
+    refreshTagList();
+    refreshWorlds();
+    finalize();
+}
+
 function mountSettings() {
     const host = document.getElementById('extensions_settings2') || document.getElementById('extensions_settings');
-    if (!host || document.getElementById('bim_settings')) return;
+    if (!host) return;
+    document.getElementById('bim_settings')?.remove();
     const c = cfg();
     const wrap = h('div', { id: 'bim_settings', class: 'bim-settings' });
     wrap.innerHTML = `
@@ -809,19 +868,26 @@ function mountSettings() {
                 <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
             </div>
             <div class="inline-drawer-content">
-                <div id="bim_open" class="menu_button menu_button_icon"><i class="fa-solid fa-boxes-packing"></i><span>Open Bot Importer</span></div>
-                <label class="bim-set">Duplicate threshold: <b id="bim_dup_val">${c.dupThreshold}</b>%
+                <div id="bim_open" class="menu_button menu_button_icon"><i class="fa-solid fa-boxes-packing"></i><span>${tr('Open Bot Importer')}</span></div>
+                <label class="bim-set">${tr('Language')}
+                    <select id="bim_lang" class="text_pole">
+                        <option value="auto">${tr('Automatic')}</option>
+                        <option value="en">English</option>
+                        <option value="ru">Русский</option>
+                    </select>
+                </label>
+                <label class="bim-set">${tr('Duplicate threshold:')} <b id="bim_dup_val">${c.dupThreshold}</b>%
                     <input id="bim_dup" type="range" min="60" max="100" step="1" value="${c.dupThreshold}">
                 </label>
-                <label class="bim-set">Similar threshold: <b id="bim_sim_val">${c.similarThreshold}</b>%
+                <label class="bim-set">${tr('Similar threshold:')} <b id="bim_sim_val">${c.similarThreshold}</b>%
                     <input id="bim_sim" type="range" min="30" max="95" step="1" value="${c.similarThreshold}">
                 </label>
-                <label class="checkbox_label"><input id="bim_auto" type="checkbox" ${c.autoSkipExact ? 'checked' : ''}><span>Untick exact duplicates automatically</span></label>
-                <label class="checkbox_label"><input id="bim_ignore" type="checkbox" ${c.ignoreCardTags ? 'checked' : ''}><span>Ignore tags that come with the cards</span></label>
-                <label class="bim-set">Always ignore these tags (separated by commas)
+                <label class="checkbox_label"><input id="bim_auto" type="checkbox" ${c.autoSkipExact ? 'checked' : ''}><span>${tr('Untick exact duplicates automatically')}</span></label>
+                <label class="checkbox_label"><input id="bim_ignore" type="checkbox" ${c.ignoreCardTags ? 'checked' : ''}><span>${tr('Ignore tags that come with the cards')}</span></label>
+                <label class="bim-set">${tr('Always ignore these tags (separated by commas)')}
                     <input id="bim_ignored" type="text" class="text_pole" autocomplete="off">
                 </label>
-                <small>Cards are compared by description and intro messages, never by name alone. New thresholds apply to cards added from now on.</small>
+                <small>${tr('Cards are compared by description and intro messages, never by name alone. New thresholds apply to cards added from now on.')}</small>
             </div>
         </div>`;
     host.append(wrap);
@@ -838,6 +904,9 @@ function mountSettings() {
     const ignored = wrap.querySelector('#bim_ignored');
     ignored.value = c.ignoredTags || '';
     ignored.addEventListener('change', () => { cfg().ignoredTags = ignored.value; save(); items.forEach(applyIgnore); });
+    const lang = wrap.querySelector('#bim_lang');
+    lang.value = c.language || 'auto';
+    lang.addEventListener('change', () => { cfg().language = lang.value; save(); rebuildUI(); });
 }
 
 function mountButtons() {
@@ -849,7 +918,7 @@ function mountButtons() {
     }
     const imp = document.getElementById('character_import_button');
     if (imp && !document.getElementById('bim_char_btn')) {
-        imp.after(h('div', { id: 'bim_char_btn', class: 'menu_button fa-solid fa-boxes-packing faSmallFontSquareFix', title: 'Bulk import with Bot Importer', tabindex: '0', role: 'button', onclick: openModal }));
+        imp.after(h('div', { id: 'bim_char_btn', class: 'menu_button fa-solid fa-boxes-packing faSmallFontSquareFix', title: tr('Bulk import with Bot Importer'), tabindex: '0', role: 'button', onclick: openModal }));
     }
 }
 

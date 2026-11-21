@@ -1,5 +1,7 @@
 # Bot Importer for SillyTavern
 
+English | [Русский](README.ru.md)
+
 Import many character cards at once. Set each bot's profile picture, tags and lorebooks before importing, without opening any bot. Works on desktop and on phones.
 
 ## Install from GitHub
@@ -25,7 +27,14 @@ cd SillyTavern/data/<your-user>/extensions
 git clone https://github.com/smolsn3k/st-bot-importer
 ```
 
-You can also download the repository as a ZIP and unpack it into the same folder. Make sure `manifest.json` ends up directly inside the `st-bot-importer` folder, next to `index.js`, `lib.js` and `style.css`.
+You can also download the repository as a ZIP and unpack it into the same folder. Make sure `manifest.json` ends up directly inside the `st-bot-importer` folder, next to `index.js`, `lib.js`, `i18n.js` and `style.css`.
+
+## Language
+
+The extension is available in English and Russian. By default it follows your SillyTavern (or browser) language, so a Russian setup gets the Russian interface. You can switch at any time:
+
+- with the **EN / RU** button in the header of the Bot Importer window
+- with the **Language** list in the Extensions panel, under Bot Importer
 
 ## Open it
 
